@@ -295,6 +295,21 @@ class DySurvCompetingRisk(nn.Module):
 
 ######## Loss ########
 
+def adaptive_pos_weight(events) -> float:
+    """Compute pos_weight from event rate, auto-adapting to dataset imbalance.
+
+    Inverse of event rate, capped at 20. For high event-rate datasets (>=30%)
+    no reweighting is applied. This replaces the old hardcoded pos_weight=50.
+    """
+    if isinstance(events, Tensor):
+        event_rate = (events > 0).float().mean().item()
+    else:
+        event_rate = float((np.array(events) > 0).mean())
+    if event_rate < 0.3:
+        return min(max(1.0 / (event_rate + 1e-3), 1.0), 20.0)
+    return 1.0
+
+
 def _reduction(loss: Tensor, reduction: str = 'mean') -> Tensor:
     if reduction == 'none':
         return loss
@@ -305,7 +320,8 @@ def _reduction(loss: Tensor, reduction: str = 'mean') -> Tensor:
     raise ValueError(f"`reduction` = {reduction} is not valid. Use 'none', 'mean' or 'sum'.")
 
 def nll_logistic_hazard(phi: Tensor, idx_durations: Tensor, events: Tensor,
-                        reduction: str = 'mean', training: bool = True) -> Tensor:
+                        reduction: str = 'mean', training: bool = True,
+                        pos_weight: float | None = None) -> Tensor:
     """
     References:
     [1] Håvard Kvamme and Ørnulf Borgan. Continuous and Discrete-Time Survival Prediction
@@ -335,12 +351,12 @@ def nll_logistic_hazard(phi: Tensor, idx_durations: Tensor, events: Tensor,
     # Creates a target for bce: initialise everything with 0, and setting events at idx_duration
     y_bce = torch.zeros_like(phi).scatter(1, idx_durations, events)
     
-    # Add weighting
-    pos_weight = torch.tensor([50.0])
+    # Adaptive pos_weight: auto-set from event rate instead of hardcoded value
+    pw = torch.tensor([pos_weight if pos_weight is not None else 1.0], device=phi.device)
 
     # Compute BCE
     if training:
-        bce = F.binary_cross_entropy_with_logits(phi, y_bce, pos_weight=pos_weight, reduction='none')
+        bce = F.binary_cross_entropy_with_logits(phi, y_bce, pos_weight=pw, reduction='none')
     else:
         bce = F.binary_cross_entropy_with_logits(phi, y_bce, reduction='none')
 
@@ -356,8 +372,13 @@ class _Loss(torch.nn.Module):
         self.reduction = reduction
 
 class NLLLogistiHazardLoss(_Loss):
+    def __init__(self, reduction: str = 'mean', pos_weight: float | None = None) -> None:
+        super().__init__(reduction)
+        self.pos_weight = pos_weight
+
     def forward(self, phi: Tensor, idx_durations: Tensor, events: Tensor) -> Tensor:
-        return nll_logistic_hazard(phi, idx_durations, events, self.reduction, self.training)
+        return nll_logistic_hazard(phi, idx_durations, events, self.reduction, self.training,
+                                   pos_weight=self.pos_weight)
     
 
 ######## Competing Risk Loss Functions ########
@@ -555,10 +576,10 @@ class CompetingRiskLoss(nn.Module):
 ######## Original Single Event Loss (kept for backwards compatibility) ########
 
 class Loss(nn.Module):
-    def __init__(self, alpha: list):
+    def __init__(self, alpha: list, pos_weight: float | None = None):
         super().__init__()
         self.alpha = alpha
-        self.loss_surv = NLLLogistiHazardLoss()
+        self.loss_surv = NLLLogistiHazardLoss(pos_weight=pos_weight)
         self.loss_ae = nn.MSELoss()
 
     def forward(self, decoded, phi, mu, logvar, target_loghaz, target_ae):

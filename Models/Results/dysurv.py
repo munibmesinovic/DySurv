@@ -36,6 +36,7 @@ from torch import Tensor
 # Model Utils
 from src.models.survival.model_utils import DySurv
 from src.models.survival.model_utils import Loss
+from src.models.survival.model_utils import adaptive_pos_weight
 from src.models.survival.model_utils import get_exp_dir
 from sklearn.manifold import TSNE
 
@@ -151,10 +152,10 @@ def main():
     # Build the model
     net = DySurv(in_features, encoded_features, out_features, seq_len)
 
-    # Constructing the Loss, set all losses to be equal at first / check sum
-    #sum_loss = model_config["loss_surv"] + model_config["loss_ae"] + model_config["loss_kd"]
-    #assert sum_loss <= 1.0 and sum_loss >= 0.999
-    loss = Loss([model_config["loss_surv"], model_config["loss_ae"], model_config["loss_kd"]])
+    # Constructing the Loss — pos_weight adapts to the dataset event rate
+    pw = adaptive_pos_weight(y_train_surv[1])
+    print(f"  pos_weight={pw:.1f} (event_rate={(y_train_surv[1] > 0).mean():.3f})")
+    loss = Loss([model_config["loss_surv"], model_config["loss_ae"], model_config["loss_kd"]], pos_weight=pw)
 
     # Wrapper model for the input, meaning it would have only the nll loss if it hadn't been defined. Also, it allows for surv.predictions etc.
     model = LogisticHazard(net, tt.optim.Adam(train_config["lr"]), duration_index=labtrans.cuts, loss=loss) # wrapper
